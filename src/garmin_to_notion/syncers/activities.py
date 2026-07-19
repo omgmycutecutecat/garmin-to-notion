@@ -200,8 +200,33 @@ def sync_activities(
     settings: Settings,
 ) -> None:
     """Sync all Garmin activities to the Notion Activities database."""
-    activities = garmin.get_activities(0, settings.fetch_limit)
-    logger.info("Fetched %d activities from Garmin", len(activities))
+    days_back = getattr(settings, "days_back", 45)
+    cutoff = datetime.now() - timedelta(days=days_back)
+
+    activities: list[dict] = []
+    batch_size = 100
+    start = 0
+
+    while True:
+        batch = garmin.get_activities(start, batch_size)
+        if not batch:
+            break
+        activities.extend(batch)
+
+        oldest_in_batch = gmt_to_local(batch[-1].get("startTimeGMT"), settings.timezone)
+        reached_cutoff = oldest_in_batch < cutoff
+        got_full_batch = len(batch) == batch_size
+        under_fetch_limit = not settings.fetch_limit or len(activities) < settings.fetch_limit
+
+        if reached_cutoff or not got_full_batch or not under_fetch_limit:
+            break
+        start += batch_size
+
+    logger.info(
+        "Fetched %d activities from Garmin (paginated, cutoff %s)",
+        len(activities), cutoff.date(),
+    )
+
 
     created, updated, skipped = 0, 0, 0
 
