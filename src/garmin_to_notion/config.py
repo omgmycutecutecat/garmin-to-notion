@@ -1,14 +1,10 @@
 """Settings and environment variable validation."""
-
 from __future__ import annotations
-
 import os
 import sys
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo
-
 from dotenv import load_dotenv
-
 load_dotenv()
 
 
@@ -18,7 +14,6 @@ class Settings:
     garmin_password: str
     notion_token: str
     activities_db_id: str | None
-    pr_db_id: str | None
     steps_db_id: str | None
     sleep_db_id: str | None
     workouts_db_id: str | None
@@ -32,7 +27,6 @@ class Settings:
         """Check if all database IDs are configured."""
         return all([
             self.activities_db_id,
-            self.pr_db_id,
             self.steps_db_id,
             self.sleep_db_id,
             self.workouts_db_id,
@@ -43,7 +37,7 @@ class Settings:
         """Return a new Settings with missing DB IDs filled from discovered mapping."""
         overrides = {}
         for field in (
-            "activities_db_id", "pr_db_id", "steps_db_id",
+            "activities_db_id", "steps_db_id",
             "sleep_db_id", "workouts_db_id", "summary_db_id",
         ):
             current = getattr(self, field)
@@ -60,26 +54,22 @@ def load_settings(require_garmin: bool = True) -> Settings:
     required = ["NOTION_TOKEN"]
     if require_garmin:
         required += ["GARMIN_EMAIL", "GARMIN_PASSWORD"]
-
     missing = [var for var in required if not os.getenv(var)]
     if missing:
         print(f"Error: Missing required environment variables: {', '.join(missing)}")
         print("Copy .env.example to .env and fill in your values.")
         sys.exit(1)
-
     tz_name = os.getenv("TIMEZONE", "UTC")
     try:
         timezone = ZoneInfo(tz_name)
     except (KeyError, ValueError):
         print(f"Error: Invalid timezone '{tz_name}'. Use IANA format (e.g. America/Sao_Paulo).")
         sys.exit(1)
-
     return Settings(
         garmin_email=os.getenv("GARMIN_EMAIL", ""),
         garmin_password=os.getenv("GARMIN_PASSWORD", ""),
         notion_token=os.environ["NOTION_TOKEN"],
         activities_db_id=os.getenv("NOTION_DB_ID"),
-        pr_db_id=os.getenv("NOTION_PR_DB_ID"),
         steps_db_id=os.getenv("NOTION_STEPS_DB_ID"),
         sleep_db_id=os.getenv("NOTION_SLEEP_DB_ID"),
         workouts_db_id=os.getenv("NOTION_WORKOUTS_DB_ID"),
