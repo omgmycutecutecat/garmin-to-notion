@@ -201,8 +201,26 @@ def _fetch_recent_activities(garmin: GarminClient, settings: Settings) -> list[d
             start, len(batch), len(activities),
         )
 
-        oldest_in_batch = gmt_to_local(batch[-1].get("startTimeGMT"), settings.timezone)
-        reached_cutoff = oldest_in_batch.replace(tzinfo=None) < cutoff
+        # Walk backward from the end of the batch to find a record with a
+        # usable timestamp -- one bad/missing startTimeGMT should not abort
+        # the entire fetch.
+        reached_cutoff = False
+        for record in reversed(batch):
+            raw_ts = record.get("startTimeGMT")
+            if not raw_ts:
+                continue
+            try:
+                oldest_in_batch = gmt_to_local(raw_ts, settings.timezone)
+            except (ValueError, TypeError) as e:
+                logger.warning("Skipping activity with unparseable timestamp %r: %s", raw_ts, e)
+                continue
+            reached_cutoff = oldest_in_batch.replace(tzinfo=None) < cutoff
+            break
+        else:
+            logger.warning(
+                "No activity in this batch had a usable timestamp; "
+                "continuing pagination without a cutoff check for this batch."
+            )
         got_full_batch = len(batch) == BATCH_SIZE
         under_fetch_limit = not fetch_limit or len(activities) < fetch_limit
 
@@ -224,45 +242,57 @@ def sync_activities(
     activities = _fetch_recent_activities(garmin, settings)
     logger.info("Fetched %d activities from Garmin (paginated)", len(activities))
 
-    created, updated, skipped = 0, 0, 0
+    created, updated, skipped, errors = 0, 0, 0, 0
 
+    errors = 0
     for activity in activities:
-        activity_name = activity.get("activityName", "Unnamed Activity")
-        activity_type, _ = format_activity_type(
-            activity.get("activityType", {}).get("typeKey", "Unknown"),
-            activity_name,
-        )
-        activity_date = gmt_to_local(activity.get("startTimeGMT"), settings.timezone)
-        garmin_id = activity.get("activityId")
+        try:
+            activity_name = activity.get("activityName", "Unnamed Activity")
+            activity_type, _ = format_activity_type(
+                activity.get("activityType", {}).get("typeKey", "Unknown"),
+                activity_name,
+            )
+            activity_date = gmt_to_local(activity.get("startTimeGMT"), settings.timezone)
+            garmin_id = activity.get("activityId")
 
-        existing = _activity_exists(
-            notion, settings.activities_db_id,
-            garmin_id, activity_date, activity_type, activity_name,
-        )
+            existing = _activity_exists(
+                notion, settings.activities_db_id,
+                garmin_id, activity_date, activity_type, activity_name,
+            )
 
-        if existing:
-            if _activity_needs_update(existing, activity, settings):
+            if existing:
+                if _activity_needs_update(existing, activity, settings):
+                    props = _build_properties(activity, settings)
+                    emoji = _get_icon_emoji(activity)
+                    notion.pages.update(
+                        page_id=existing["id"],
+                        properties=props,
+                        icon={"emoji": emoji},
+                    )
+                    updated += 1
+                else:
+                    skipped += 1
+            else:
                 props = _build_properties(activity, settings)
                 emoji = _get_icon_emoji(activity)
-                notion.pages.update(
-                    page_id=existing["id"],
+                notion.pages.create(
+                    parent={"database_id": settings.activities_db_id},
                     properties=props,
                     icon={"emoji": emoji},
                 )
-                updated += 1
-            else:
-                skipped += 1
-        else:
-            props = _build_properties(activity, settings)
-            emoji = _get_icon_emoji(activity)
-            notion.pages.create(
-                parent={"database_id": settings.activities_db_id},
-                properties=props,
-                icon={"emoji": emoji},
+                created += 1
+        except Exception as e:
+            errors += 1
+            logger.error(
+                "Skipping activity %r (id=%s) due to error: %s",
+                activity.get("activityName", "Unnamed Activity"),
+                activity.get("activityId"),
+                e,
+                exc_info=True,
             )
-            created += 1
+            continue
 
     logger.info(
-        "Activities sync complete: %d created, %d updated, %d unchanged",
-        created, updated, skipped,
+        "Activities sync complete: %d created, %d updated, %d unchanged, %d errors",
+        created, updated, skipped, errors,
     )
