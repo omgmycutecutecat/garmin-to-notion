@@ -89,7 +89,6 @@ def _workout_exists(
         if query["results"]:
             return query["results"][0]
 
-    # Fallback: legacy records matched by date + modality
     if date_str:
         date_only = date_str[:10]
         query2 = notion.databases.query(
@@ -126,6 +125,10 @@ def _build_properties(activity_page: dict) -> tuple[dict, str, str, str | None, 
     aerobic_effect = get_prop(props, "Aerobic Effect", "rich_text") or "Unknown"
     garmin_id = get_prop(props, "Garmin ID", "number")
 
+    # Pass through Start Time / End Time from Activities, if present there.
+    start_time = get_prop(props, "Start Time", "date")
+    end_time = get_prop(props, "End Time", "date")
+
     modality = _get_modality(activity_type, subactivity_type, activity_name)
     intensity = _get_intensity(aerobic_effect)
     intensity = _apply_intensity_floor(modality, intensity)
@@ -139,6 +142,10 @@ def _build_properties(activity_page: dict) -> tuple[dict, str, str, str | None, 
 
     if date_start:
         workout_props["Date"] = {"date": {"start": date_start}}
+    if start_time:
+        workout_props["Start Time"] = {"date": {"start": start_time}}
+    if end_time:
+        workout_props["End Time"] = {"date": {"start": end_time}}
     if duration and duration.strip():
         workout_props["Duration"] = {
             "rich_text": [{"text": {"content": duration}}]
