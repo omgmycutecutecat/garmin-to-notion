@@ -1,4 +1,4 @@
-"""All mapping constants for activity types, icons, modalities, and records."""
+"""All mapping constants for activity types, icons, and modalities."""
 
 # ---------------------------------------------------------------------------
 # Activity Emojis (used by Activities sync)
@@ -95,62 +95,6 @@ ACTIVITY_EMOJIS: dict[str, str] = {
 }
 
 # ---------------------------------------------------------------------------
-# Personal Records: typeId -> display name
-# ---------------------------------------------------------------------------
-RECORD_TYPE_NAMES: dict[int, str] = {
-    1: "1K",
-    2: "1mi",
-    3: "5K",
-    4: "10K",
-    7: "Longest Run",
-    8: "Longest Ride",
-    9: "Total Ascent",
-    10: "Max Avg Power (20 min)",
-    12: "Most Steps in a Day",
-    13: "Most Steps in a Week",
-    14: "Most Steps in a Month",
-    15: "Longest Goal Streak",
-}
-
-# ---------------------------------------------------------------------------
-# Personal Records: emoji icons
-# ---------------------------------------------------------------------------
-RECORD_ICONS: dict[str, str] = {
-    "1K": "\U0001f947",
-    "1mi": "\u26a1",
-    "5K": "\U0001f45f",
-    "10K": "\u2b50",
-    "Longest Run": "\U0001f3c3",
-    "Longest Ride": "\U0001f6b4",
-    "Total Ascent": "\U0001f6b5",
-    "Max Avg Power (20 min)": "\U0001f50b",
-    "Most Steps in a Day": "\U0001f463",
-    "Most Steps in a Week": "\U0001f6b6",
-    "Most Steps in a Month": "\U0001f4c5",
-    "Longest Goal Streak": "\u2714\ufe0f",
-    "Other": "\U0001f3c5",
-}
-
-# ---------------------------------------------------------------------------
-# Personal Records: Unsplash cover images
-# ---------------------------------------------------------------------------
-RECORD_COVERS: dict[str, str] = {
-    "1K": "https://images.unsplash.com/photo-1526676537331-7747bf8278fc?w=4800",
-    "1mi": "https://images.unsplash.com/photo-1638183395699-2c0db5b6afbb?w=4800",
-    "5K": "https://images.unsplash.com/photo-1571008887538-b36bb32f4571?w=4800",
-    "10K": "https://images.unsplash.com/photo-1529339944280-1a37d3d6fa8c?w=4800",
-    "Longest Run": "https://images.unsplash.com/photo-1532383282788-19b341e3c422?w=4800",
-    "Longest Ride": "https://images.unsplash.com/photo-1471506480208-91b3a4cc78be?w=4800",
-    "Max Avg Power (20 min)": "https://images.unsplash.com/photo-1591741535018-d042766c62eb?w=4800",
-    "Most Steps in a Day": "https://images.unsplash.com/photo-1476480862126-209bfaa8edc8?w=4800",
-    "Most Steps in a Week": "https://images.unsplash.com/photo-1602174865963-9159ed37e8f1?w=4800",
-    "Most Steps in a Month": "https://images.unsplash.com/photo-1580058572462-98e2c0e0e2f0?w=4800",
-    "Longest Goal Streak": "https://images.unsplash.com/photo-1477332552946-cfb384aeaf1c?w=4800",
-}
-
-DEFAULT_COVER = "https://images.unsplash.com/photo-1471506480208-91b3a4cc78be?w=4800"
-
-# ---------------------------------------------------------------------------
 # Workouts: Garmin Activity Type / Subactivity Type -> Modality
 # Subactivity (more specific) is checked first, then Activity Type
 # ---------------------------------------------------------------------------
@@ -179,7 +123,9 @@ MODALITY_MAP: dict[str, str] = {
     "Yoga": "Yoga",
     "Lap Swimming": "Swimming",
     "Open Water Swimming": "Swimming",
-    "Mixed Martial Arts": "BJJ",
+    # FIXED: Mixed Martial Arts now stays as its own Modality instead of
+    # being folded into BJJ.
+    "Mixed Martial Arts": "Mixed Martial Arts",
     "Hiit": "HIIT",
     "Crossfit": "Crossfit",
     # Racquet sports
@@ -207,9 +153,12 @@ MODALITY_MAP: dict[str, str] = {
     "Snowshoeing": "Winter Sports",
     "Ice Skating": "Winter Sports",
     # Water
+    # FIXED: SUP and Surfing now stay as their own Modality instead of
+    # being folded into the generic "Water Sports" bucket. Kayaking still
+    # rolls up into Water Sports as before.
     "Kayaking": "Water Sports",
-    "Stand Up Paddleboarding": "Water Sports",
-    "Surfing": "Water Sports",
+    "Stand Up Paddleboarding": "SUP",
+    "Surfing": "Surf",
     # Climbing
     "Rock Climbing": "Climbing",
     "Bouldering": "Climbing",
@@ -224,6 +173,9 @@ MODALITY_MAP: dict[str, str] = {
     "Running": "Running",
     "Cycling": "Outdoor Cycling",
     "BJJ": "BJJ",
+    "Mixed Martial Arts": "Mixed Martial Arts",
+    "SUP": "SUP",
+    "Surf": "Surf",
     "HIIT": "HIIT",
     "Swimming": "Swimming",
     "Walking": "Walking",
@@ -265,6 +217,7 @@ NAME_OVERRIDE_MAP: dict[str, str] = {
 INTENSITY_FLOOR: dict[str, str] = {
     "HIIT": "Moderate",
     "BJJ": "Moderate",
+    "Mixed Martial Arts": "Moderate",
 }
 
 # ---------------------------------------------------------------------------
