@@ -3,7 +3,6 @@
 Usage:
     python -m garmin_to_notion              # Run all syncs
     python -m garmin_to_notion activities   # Sync only activities
-    python -m garmin_to_notion records      # Sync only personal records
     python -m garmin_to_notion steps        # Sync only daily steps
     python -m garmin_to_notion sleep        # Sync only sleep data
     python -m garmin_to_notion workouts     # Sync only workouts
@@ -30,7 +29,7 @@ def main() -> None:
         "command",
         nargs="?",
         default="all",
-        choices=["all", "activities", "records", "steps", "sleep", "workouts", "summary", "cleanup"],
+        choices=["all", "activities", "steps", "sleep", "workouts", "summary", "cleanup"],
         help="Which sync to run (default: all)",
     )
     parser.add_argument(
@@ -83,7 +82,6 @@ def main() -> None:
     from garmin_to_notion.clients import init_clients
     from garmin_to_notion.syncers.activities import sync_activities
     from garmin_to_notion.syncers.daily_steps import sync_daily_steps
-    from garmin_to_notion.syncers.personal_records import sync_personal_records
     from garmin_to_notion.syncers.sleep import sync_sleep
     from garmin_to_notion.syncers.summary import sync_summary
     from garmin_to_notion.syncers.workouts import sync_workouts
@@ -92,7 +90,6 @@ def main() -> None:
 
     sync_map = {
         "activities": lambda: sync_activities(clients.garmin, clients.notion, settings),
-        "records": lambda: sync_personal_records(clients.garmin, clients.notion, settings),
         "steps": lambda: sync_daily_steps(clients.garmin, clients.notion, settings),
         "sleep": lambda: sync_sleep(clients.garmin, clients.notion, settings),
         "workouts": lambda: sync_workouts(clients.notion, settings),
@@ -102,7 +99,6 @@ def main() -> None:
     # Database ID required for each syncer
     db_check = {
         "activities": settings.activities_db_id,
-        "records": settings.pr_db_id,
         "steps": settings.steps_db_id,
         "sleep": settings.sleep_db_id,
         "workouts": settings.workouts_db_id,
