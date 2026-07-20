@@ -1,19 +1,15 @@
 """Shared Notion API utilities."""
-
 from __future__ import annotations
-
 import logging
 import time
 from functools import wraps
 from typing import Any
-
 from notion_client import Client as NotionClient
 
 logger = logging.getLogger(__name__)
 
 EXPECTED_DATABASES = {
     "Activities": "activities_db_id",
-    "Personal Records": "pr_db_id",
     "Daily Steps": "steps_db_id",
     "Sleep": "sleep_db_id",
     "Workouts": "workouts_db_id",
@@ -26,7 +22,6 @@ def discover_databases(notion: NotionClient) -> dict[str, str]:
     results = notion.search(
         filter={"property": "object", "value": "database"},
     ).get("results", [])
-
     found: dict[str, str] = {}
     for db in results:
         title_parts = db.get("title", [])
@@ -35,7 +30,6 @@ def discover_databases(notion: NotionClient) -> dict[str, str]:
             field = EXPECTED_DATABASES[title]
             found[field] = db["id"]
             logger.debug("Discovered database '%s' -> %s", title, db["id"])
-
     missing = [name for name, field in EXPECTED_DATABASES.items() if field not in found]
     if missing:
         logger.warning(
