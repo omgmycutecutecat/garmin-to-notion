@@ -115,7 +115,7 @@ def main() -> None:
             logger.info("Starting %s sync...", cmd)
             sync_map[cmd]()
         except Exception as e:
-            logger.error("Error during %s sync: %s", cmd, e, exc_info=args.verbose)
+            logger.error("Error during %s sync: %s", cmd, e, exc_info=True)
             if args.command != "all":
                 sys.exit(1)
 
