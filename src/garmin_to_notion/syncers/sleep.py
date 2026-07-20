@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from garminconnect import Garmin as GarminClient
@@ -14,6 +14,14 @@ from garmin_to_notion.formatters import format_duration
 from garmin_to_notion.notion_helpers import fetch_all_pages, get_prop
 
 logger = logging.getLogger(__name__)
+
+
+def _epoch_ms_to_local_iso(timestamp_ms: int | None, tz: ZoneInfo) -> str | None:
+    """Convert a Garmin millisecond epoch timestamp to a local ISO datetime string."""
+    if not timestamp_ms:
+        return None
+    dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc).astimezone(tz)
+    return dt.isoformat()
 
 
 def _compute_sleep_score(
@@ -35,7 +43,6 @@ def _compute_sleep_score(
 
     total_hours = total_sleep / 3600
 
-    # Duration: 100 if 7-9h, linear ramp from 4h->7h and 9h->11h
     if 7 <= total_hours <= 9:
         dur_score = 100
     elif total_hours < 7:
@@ -43,15 +50,12 @@ def _compute_sleep_score(
     else:
         dur_score = max(0, (11 - total_hours) / 2 * 100)
 
-    # Deep %: optimal ~20%, score drops linearly away from target
     deep_pct = deep_sec / total_sleep * 100
     deep_score = max(0, 100 - abs(deep_pct - 20) * 4)
 
-    # REM %: optimal ~22%, score drops linearly away from target
     rem_pct = rem_sec / total_sleep * 100
     rem_score = max(0, 100 - abs(rem_pct - 22) * 4)
 
-    # Awake penalty: 0 min = 100, 30+ min = 0
     awake_min = awake_sec / 60
     awake_score = max(0, 100 - awake_min * (100 / 30))
 
@@ -127,7 +131,15 @@ def _build_properties(sleep_data: dict, settings: Settings) -> dict | None:
         daily_sleep.get("awakeSleepSeconds", 0) or 0,
     )
 
-    return {
+    # Garmin exposes sleep window bounds as millisecond epoch timestamps.
+    start_iso = _epoch_ms_to_local_iso(
+        daily_sleep.get("sleepStartTimestampGMT"), settings.timezone
+    )
+    end_iso = _epoch_ms_to_local_iso(
+        daily_sleep.get("sleepEndTimestampGMT"), settings.timezone
+    )
+
+    properties = {
         "Name": {
             "title": [{"text": {"content": format_duration(total_sleep)}}]
         },
@@ -137,51 +149,34 @@ def _build_properties(sleep_data: dict, settings: Settings) -> dict | None:
         },
         "Deep": {
             "rich_text": [
-                {
-                    "text": {
-                        "content": format_duration(
-                            daily_sleep.get("deepSleepSeconds", 0)
-                        )
-                    }
-                }
+                {"text": {"content": format_duration(daily_sleep.get("deepSleepSeconds", 0))}}
             ]
         },
         "Light": {
             "rich_text": [
-                {
-                    "text": {
-                        "content": format_duration(
-                            daily_sleep.get("lightSleepSeconds", 0)
-                        )
-                    }
-                }
+                {"text": {"content": format_duration(daily_sleep.get("lightSleepSeconds", 0))}}
             ]
         },
         "REM": {
             "rich_text": [
-                {
-                    "text": {
-                        "content": format_duration(
-                            daily_sleep.get("remSleepSeconds", 0)
-                        )
-                    }
-                }
+                {"text": {"content": format_duration(daily_sleep.get("remSleepSeconds", 0))}}
             ]
         },
         "Awake": {
             "rich_text": [
-                {
-                    "text": {
-                        "content": format_duration(
-                            daily_sleep.get("awakeSleepSeconds", 0)
-                        )
-                    }
-                }
+                {"text": {"content": format_duration(daily_sleep.get("awakeSleepSeconds", 0))}}
             ]
         },
         "Resting HR": {"number": sleep_data.get("restingHeartRate", 0)},
         "Score": {"number": score},
     }
+
+    if start_iso:
+        properties["Start Time"] = {"date": {"start": start_iso}}
+    if end_iso:
+        properties["End Time"] = {"date": {"start": end_iso}}
+
+    return properties
 
 
 def sync_sleep(
@@ -194,12 +189,10 @@ def sync_sleep(
         logger.info("No sleep database configured, skipping")
         return
 
-    # Bulk-fetch existing entries (1 Notion query instead of N)
     logger.info("Fetching existing sleep entries from Notion...")
     existing_map = _get_existing_sleep_dates(notion, settings.sleep_db_id)
     logger.info("Found %d existing sleep entries in Notion", len(existing_map))
 
-    # Fetch only missing days from Garmin
     sleep_entries = _get_sleep_range(
         garmin, settings.days_back, settings.timezone, set(existing_map.keys())
     )
@@ -222,7 +215,6 @@ def sync_sleep(
         )
         created += 1
 
-    # Repair entries with missing/zero scores
     repaired = 0
     for date_str, page in existing_map.items():
         props = page["properties"]
@@ -230,7 +222,6 @@ def sync_sleep(
         if current_score and current_score > 0:
             continue
 
-        # Fetch fresh data from Garmin to recompute score
         try:
             data = garmin.get_sleep_data(date_str)
             if not data or not data.get("dailySleepDTO"):
