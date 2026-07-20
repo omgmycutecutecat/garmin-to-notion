@@ -21,6 +21,8 @@ from garmin_to_notion.mappings import ACTIVITY_EMOJIS
 
 logger = logging.getLogger(__name__)
 
+BATCH_SIZE = 100
+
 
 def _build_properties(activity: dict, settings: Settings) -> dict:
     """Build the Notion properties payload from a Garmin activity."""
@@ -30,8 +32,9 @@ def _build_properties(activity: dict, settings: Settings) -> dict:
         activity_name,
     )
     local_date = gmt_to_local(activity.get("startTimeGMT"), settings.timezone)
+    duration_seconds = activity.get("duration", 0) or 0
+    end_time = local_date + timedelta(seconds=duration_seconds)
 
-    # Heatmap properties
     day_of_week = local_date.strftime("%A")
     hour = local_date.hour
     block_start = (hour // 2) * 2
@@ -39,6 +42,8 @@ def _build_properties(activity: dict, settings: Settings) -> dict:
 
     return {
         "Date": {"date": {"start": local_date.isoformat()}},
+        "Start Time": {"date": {"start": local_date.isoformat()}},
+        "End Time": {"date": {"start": end_time.isoformat()}},
         "Type": {"select": {"name": activity_type}},
         "SubType": {"select": {"name": activity_subtype}},
         "Name": {"title": [{"text": {"content": activity_name}}]},
@@ -100,7 +105,6 @@ def _build_properties(activity: dict, settings: Settings) -> dict:
 
 
 def _get_icon_emoji(activity: dict) -> str:
-    """Get the emoji icon for an activity based on its type."""
     activity_name = activity.get("activityName", "")
     _, activity_subtype = format_activity_type(
         activity.get("activityType", {}).get("typeKey", "Unknown"),
@@ -117,10 +121,6 @@ def _activity_exists(
     activity_type: str,
     activity_name: str,
 ) -> dict | None:
-    """Check if an activity already exists in the Notion database.
-
-    Primary lookup: by Garmin ID (unique). Fallback: date + type + name.
-    """
     if garmin_id:
         query = notion.databases.query(
             database_id=database_id,
@@ -129,7 +129,6 @@ def _activity_exists(
         if query["results"]:
             return query["results"][0]
 
-    # Fallback for legacy entries without Garmin ID
     lookup_type = (
         "Stretching" if "stretch" in activity_name.lower() else activity_type
     )
@@ -140,14 +139,8 @@ def _activity_exists(
         database_id=database_id,
         filter={
             "and": [
-                {
-                    "property": "Date",
-                    "date": {"on_or_after": lookup_min.isoformat()},
-                },
-                {
-                    "property": "Date",
-                    "date": {"on_or_before": lookup_max.isoformat()},
-                },
+                {"property": "Date", "date": {"on_or_after": lookup_min.isoformat()}},
+                {"property": "Date", "date": {"on_or_before": lookup_max.isoformat()}},
                 {"property": "Type", "select": {"equals": lookup_type}},
                 {"property": "Name", "title": {"equals": activity_name}},
             ]
@@ -160,9 +153,7 @@ def _activity_exists(
 def _activity_needs_update(
     existing: dict, new_activity: dict, settings: Settings
 ) -> bool:
-    """Compare an existing Notion page with new Garmin data to detect changes."""
     props = existing["properties"]
-
     try:
         existing_date = props["Date"]["date"]["start"]
         new_date = gmt_to_local(
@@ -186,12 +177,43 @@ def _activity_needs_update(
             or props["Max HR"]["number"]
             != round(new_activity.get("maxHR", 0) or 0)
         )
-        return (
-            date_changed or distance_changed or calories_changed
-            or pace_changed or hr_changed
-        )
+        return date_changed or distance_changed or calories_changed or pace_changed or hr_changed
     except (KeyError, TypeError, IndexError):
         return True
+
+
+def _fetch_recent_activities(garmin: GarminClient, settings: Settings) -> list[dict]:
+    days_back = settings.days_back or 45
+    cutoff = datetime.now() - timedelta(days=days_back)
+    fetch_limit = settings.fetch_limit
+
+    activities: list[dict] = []
+    start = 0
+
+    while True:
+        batch = garmin.get_activities(start, BATCH_SIZE)
+        if not batch:
+            break
+
+        activities.extend(batch)
+        logger.info(
+            "Fetched batch at offset %d (%d activities, %d total so far)",
+            start, len(batch), len(activities),
+        )
+
+        oldest_in_batch = gmt_to_local(batch[-1].get("startTimeGMT"), settings.timezone)
+        reached_cutoff = oldest_in_batch.replace(tzinfo=None) < cutoff
+        got_full_batch = len(batch) == BATCH_SIZE
+        under_fetch_limit = not fetch_limit or len(activities) < fetch_limit
+
+        if reached_cutoff or not got_full_batch or not under_fetch_limit:
+            break
+        start += BATCH_SIZE
+
+    if fetch_limit:
+        activities = activities[:fetch_limit]
+
+    return activities
 
 
 def sync_activities(
@@ -199,9 +221,8 @@ def sync_activities(
     notion: NotionClient,
     settings: Settings,
 ) -> None:
-    """Sync all Garmin activities to the Notion Activities database."""
-    activities = garmin.get_activities(0, settings.fetch_limit)
-    logger.info("Fetched %d activities from Garmin", len(activities))
+    activities = _fetch_recent_activities(garmin, settings)
+    logger.info("Fetched %d activities from Garmin (paginated)", len(activities))
 
     created, updated, skipped = 0, 0, 0
 
@@ -243,7 +264,5 @@ def sync_activities(
 
     logger.info(
         "Activities sync complete: %d created, %d updated, %d unchanged",
-        created,
-        updated,
-        skipped,
+        created, updated, skipped,
     )
