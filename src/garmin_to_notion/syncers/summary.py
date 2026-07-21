@@ -1,12 +1,8 @@
 """Aggregate Workouts, Steps, and Sleep into weekly/monthly/yearly summaries.
 
-Reads from the Workouts, Steps, and Sleep databases and creates/updates
-entries in the Summary database with totals per period (Week/Month/Year) and
-per modality.
-
-Each period generates:
-  - 1 "All" entry with workout totals + lifestyle averages
-  - N entries, one per modality present in that period
+Reads from the Workouts, Steps, and Sleep databases and creates/updates a
+single "All" entry per period (Week/Month/Year) in the Summary database.
+No per-modality breakdown -- that concept has been removed entirely.
 
 Runs AFTER the workouts sync.
 """
@@ -14,7 +10,6 @@ Runs AFTER the workouts sync.
 from __future__ import annotations
 
 import logging
-from collections import Counter
 from datetime import date, timedelta
 
 from notion_client import Client as NotionClient
@@ -102,7 +97,6 @@ def _compute_lifestyle_averages(
     """Compute avg sleep, resting HR, steps, and step goal % per period."""
     averages: dict[tuple[str, str], dict] = {}
 
-    # --- Steps ---
     if settings.steps_db_id:
         steps_pages = fetch_all_pages(notion, settings.steps_db_id)
         steps_by_period: dict[tuple[str, str], list[dict]] = {}
@@ -134,7 +128,6 @@ def _compute_lifestyle_averages(
             bucket["avg_steps"] = avg_steps
             bucket["step_goal_pct"] = goal_pct
 
-    # --- Sleep ---
     if settings.sleep_db_id:
         sleep_pages = fetch_all_pages(notion, settings.sleep_db_id)
         sleep_by_period: dict[tuple[str, str], list[dict]] = {}
@@ -158,7 +151,6 @@ def _compute_lifestyle_averages(
         for key, values in sleep_by_period.items():
             durations = [v["duration_min"] for v in values if v["duration_min"] > 0]
             hrs = [v["resting_hr"] for v in values if v["resting_hr"] > 0]
-
             scores = [v["score"] for v in values if v["score"] > 0]
 
             bucket = averages.setdefault(key, {})
@@ -173,7 +165,10 @@ def _compute_lifestyle_averages(
 
 
 def _build_summaries(workouts: list[dict]) -> list[dict]:
-    """Group workouts into week/month/year buckets, then aggregate All + per-modality."""
+    """Group workouts into week/month/year buckets and aggregate totals.
+
+    One summary row per period -- no per-modality split.
+    """
     records: list[dict] = []
     for w in workouts:
         props = w["properties"]
@@ -182,7 +177,6 @@ def _build_summaries(workouts: list[dict]) -> list[dict]:
             continue
 
         d = date.fromisoformat(date_str[:10])
-        modality = get_prop(props, "Modality", "select") or "Other"
         duration_str = get_prop(props, "Duration", "rich_text") or ""
         distance = get_prop(props, "Distance (km)", "number") or 0
         calories = get_prop(props, "Calories", "number") or 0
@@ -190,7 +184,6 @@ def _build_summaries(workouts: list[dict]) -> list[dict]:
 
         records.append({
             "date": d,
-            "modality": modality,
             "duration_min": _parse_duration_minutes(duration_str),
             "distance": distance,
             "calories": calories,
@@ -218,10 +211,6 @@ def _build_summaries(workouts: list[dict]) -> list[dict]:
         total_calories = round(sum(r["calories"] for r in recs))
         active_days = len(set(r["date"] for r in recs))
 
-        modality_counts = Counter(r["modality"] for r in recs)
-        top_modality = modality_counts.most_common(1)[0][0] if modality_counts else "N/A"
-        breakdown = " / ".join(f"{m}: {c}" for m, c in modality_counts.most_common())
-
         weeks_in_period = max(1, ((end - start).days + 1) / 7)
         avg_per_week = round(total_workouts / weeks_in_period, 1)
 
@@ -231,50 +220,16 @@ def _build_summaries(workouts: list[dict]) -> list[dict]:
         summaries.append({
             "name": label,
             "period": period,
-            "modality": "All",
             "start": start.isoformat(),
             "end": end.isoformat(),
             "total_workouts": total_workouts,
             "total_duration": total_duration,
             "total_distance": total_distance,
             "total_calories": total_calories,
-            "top_modality": top_modality,
-            "breakdown": breakdown,
             "avg_per_week": avg_per_week,
             "active_days": active_days,
             "avg_hr": avg_hr,
         })
-
-        by_modality: dict[str, list[dict]] = {}
-        for r in recs:
-            by_modality.setdefault(r["modality"], []).append(r)
-
-        for modality, mod_recs in by_modality.items():
-            mod_workouts = len(mod_recs)
-            mod_duration = round(sum(r["duration_min"] for r in mod_recs))
-            mod_distance = round(sum(r["distance"] for r in mod_recs), 1)
-            mod_calories = round(sum(r["calories"] for r in mod_recs))
-            mod_avg = round(mod_workouts / weeks_in_period, 1)
-
-            mod_hr_values = [r["avg_hr"] for r in mod_recs if r["avg_hr"] > 0]
-            mod_avg_hr = round(sum(mod_hr_values) / len(mod_hr_values)) if mod_hr_values else 0
-
-            summaries.append({
-                "name": label,
-                "period": period,
-                "modality": modality,
-                "start": start.isoformat(),
-                "end": end.isoformat(),
-                "total_workouts": mod_workouts,
-                "total_duration": mod_duration,
-                "total_distance": mod_distance,
-                "total_calories": mod_calories,
-                "top_modality": modality,
-                "breakdown": "",
-                "avg_per_week": mod_avg,
-                "active_days": 0,
-                "avg_hr": mod_avg_hr,
-            })
 
     return summaries
 
@@ -284,16 +239,14 @@ def _summary_exists(
     db_id: str,
     start_date: str,
     period: str,
-    modality: str,
 ) -> dict | None:
-    """Check if a summary entry already exists by Start date + period + modality."""
+    """Check if a summary entry already exists by Start date + period."""
     query = notion.databases.query(
         database_id=db_id,
         filter={
             "and": [
                 {"property": "Start", "date": {"equals": start_date}},
                 {"property": "Period", "select": {"equals": period}},
-                {"property": "Modality", "select": {"equals": modality}},
             ]
         },
     )
@@ -305,15 +258,12 @@ def _build_properties(summary: dict) -> dict:
     return {
         "Name": {"title": [{"text": {"content": summary["name"]}}]},
         "Period": {"select": {"name": summary["period"]}},
-        "Modality": {"select": {"name": summary["modality"]}},
         "Start": {"date": {"start": summary["start"]}},
         "End": {"date": {"start": summary["end"]}},
         "Total Workouts": {"number": summary["total_workouts"]},
         "Total Duration (min)": {"number": summary["total_duration"]},
         "Total Distance (km)": {"number": summary["total_distance"]},
         "Total Calories": {"number": summary["total_calories"]},
-        "Top Modality": {"rich_text": [{"text": {"content": summary["top_modality"]}}]},
-        "Breakdown": {"rich_text": [{"text": {"content": summary["breakdown"]}}]},
         "Avg per Week": {"number": summary["avg_per_week"]},
         "Active Days": {"number": summary.get("active_days") or None},
         "Avg HR": {"number": summary.get("avg_hr") or None},
@@ -340,32 +290,27 @@ def sync_summary(notion: NotionClient, settings: Settings) -> None:
     logger.info("Found %d workouts to aggregate", len(workouts))
 
     summaries = _build_summaries(workouts)
-    logger.info("Generated %d summary entries (week/month/year x modality)", len(summaries))
+    logger.info("Generated %d summary entries (week/month/year)", len(summaries))
 
     lifestyle = _compute_lifestyle_averages(notion, settings)
     logger.info("Computed lifestyle averages for %d periods", len(lifestyle))
 
     for summary in summaries:
-        if summary["modality"] == "All":
-            key = (summary["period"], summary["name"])
-            avgs = lifestyle.get(key, {})
-            avg_sleep_min = avgs.get("avg_sleep_min", 0)
-            summary["avg_sleep"] = _format_minutes(avg_sleep_min) if avg_sleep_min else ""
-            summary["avg_resting_hr"] = avgs.get("avg_resting_hr", 0)
-            summary["avg_sleep_score"] = avgs.get("avg_sleep_score", 0)
-            summary["avg_steps"] = avgs.get("avg_steps", 0)
-            summary["step_goal_pct"] = avgs.get("step_goal_pct", 0)
+        key = (summary["period"], summary["name"])
+        avgs = lifestyle.get(key, {})
+        avg_sleep_min = avgs.get("avg_sleep_min", 0)
+        summary["avg_sleep"] = _format_minutes(avg_sleep_min) if avg_sleep_min else ""
+        summary["avg_resting_hr"] = avgs.get("avg_resting_hr", 0)
+        summary["avg_sleep_score"] = avgs.get("avg_sleep_score", 0)
+        summary["avg_steps"] = avgs.get("avg_steps", 0)
+        summary["step_goal_pct"] = avgs.get("step_goal_pct", 0)
 
     created, updated = 0, 0
 
     for summary in summaries:
         props = _build_properties(summary)
         existing = _summary_exists(
-            notion,
-            settings.summary_db_id,
-            summary["start"],
-            summary["period"],
-            summary["modality"],
+            notion, settings.summary_db_id, summary["start"], summary["period"],
         )
 
         if existing:
