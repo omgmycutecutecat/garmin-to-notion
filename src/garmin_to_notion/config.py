@@ -18,6 +18,7 @@ class Settings:
     sleep_db_id: str | None
     workouts_db_id: str | None
     summary_db_id: str | None
+    calories_db_id: str | None
     timezone: ZoneInfo
     fetch_limit: int
     days_back: int
@@ -31,6 +32,7 @@ class Settings:
             self.sleep_db_id,
             self.workouts_db_id,
             self.summary_db_id,
+            self.calories_db_id,
         ])
 
     def with_discovered_ids(self, discovered: dict[str, str]) -> Settings:
@@ -39,6 +41,7 @@ class Settings:
         for field in (
             "activities_db_id", "steps_db_id",
             "sleep_db_id", "workouts_db_id", "summary_db_id",
+            "calories_db_id",
         ):
             current = getattr(self, field)
             if not current and field in discovered:
@@ -74,6 +77,7 @@ def load_settings(require_garmin: bool = True) -> Settings:
         sleep_db_id=os.getenv("NOTION_SLEEP_DB_ID"),
         workouts_db_id=os.getenv("NOTION_WORKOUTS_DB_ID"),
         summary_db_id=os.getenv("NOTION_SUMMARY_DB_ID"),
+        calories_db_id=os.getenv("NOTION_CALORIES_DB_ID"),
         timezone=timezone,
         fetch_limit=int(os.getenv("GARMIN_ACTIVITIES_FETCH_LIMIT", "1000")),
         days_back=int(os.getenv("GARMIN_DAYS_BACK", "30")),
