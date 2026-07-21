@@ -4,7 +4,8 @@ Usage:
     python -m garmin_to_notion              # Run all syncs
     python -m garmin_to_notion activities   # Sync only activities
     python -m garmin_to_notion steps        # Sync only daily steps
-    python -m garmin_to_notion sleep        # Sync only sleep data
+    python -m garmin_to_notion calories     # Sync only daily calories
+    python -m garmin_to_notion sleep        # Sync only sleep datahttps://github.com/omgmycutecutecat/garmin-to-notion/blob/main/src/garmin_to_notion/__main__.py
     python -m garmin_to_notion workouts     # Sync only workouts
     python -m garmin_to_notion summary      # Sync only summary aggregations
     python -m garmin_to_notion cleanup      # Deduplicate workouts (dry run)
@@ -29,7 +30,7 @@ def main() -> None:
         "command",
         nargs="?",
         default="all",
-        choices=["all", "activities", "steps", "sleep", "workouts", "summary", "cleanup"],
+        choices=["all", "activities", "steps", "calories", "sleep", "workouts", "summary", "cleanup"],
         help="Which sync to run (default: all)",
     )
     parser.add_argument(
@@ -81,6 +82,7 @@ def main() -> None:
 
     from garmin_to_notion.clients import init_clients
     from garmin_to_notion.syncers.activities import sync_activities
+    from garmin_to_notion.syncers.daily_calories import sync_daily_calories
     from garmin_to_notion.syncers.daily_steps import sync_daily_steps
     from garmin_to_notion.syncers.sleep import sync_sleep
     from garmin_to_notion.syncers.summary import sync_summary
@@ -91,6 +93,7 @@ def main() -> None:
     sync_map = {
         "activities": lambda: sync_activities(clients.garmin, clients.notion, settings),
         "steps": lambda: sync_daily_steps(clients.garmin, clients.notion, settings),
+        "calories": lambda: sync_daily_calories(clients.garmin, clients.notion, settings),
         "sleep": lambda: sync_sleep(clients.garmin, clients.notion, settings),
         "workouts": lambda: sync_workouts(clients.notion, settings),
         "summary": lambda: sync_summary(clients.notion, settings),
@@ -100,6 +103,7 @@ def main() -> None:
     db_check = {
         "activities": settings.activities_db_id,
         "steps": settings.steps_db_id,
+        "calories": settings.calories_db_id,
         "sleep": settings.sleep_db_id,
         "workouts": settings.workouts_db_id,
         "summary": settings.summary_db_id,
