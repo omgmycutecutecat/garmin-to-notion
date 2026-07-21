@@ -1,7 +1,7 @@
-"""Aggregate Workouts, Steps, and Sleep into monthly/yearly summaries.
+"""Aggregate Workouts, Steps, and Sleep into weekly/monthly/yearly summaries.
 
 Reads from the Workouts, Steps, and Sleep databases and creates/updates
-entries in the Summary database with totals per period (Month/Year) and
+entries in the Summary database with totals per period (Week/Month/Year) and
 per modality.
 
 Each period generates:
@@ -84,6 +84,17 @@ def _year_range(d: date) -> tuple[date, date, str]:
     return start, end, label
 
 
+def _week_range(d: date) -> tuple[date, date, str]:
+    """Return (start, end, label) for the Mon-Sun week containing date d."""
+    start = d - timedelta(days=d.weekday())  # Monday
+    end = start + timedelta(days=6)  # Sunday
+    label = f"Week of {start.strftime('%b %d, %Y')}"
+    return start, end, label
+
+
+PERIOD_RANGES = [("Week", _week_range), ("Month", _month_range), ("Year", _year_range)]
+
+
 def _compute_lifestyle_averages(
     notion: NotionClient,
     settings: Settings,
@@ -103,7 +114,7 @@ def _compute_lifestyle_averages(
             if not date_str:
                 continue
             d = date.fromisoformat(date_str[:10])
-            for period, range_fn in [("Month", _month_range), ("Year", _year_range)]:
+            for period, range_fn in PERIOD_RANGES:
                 _, _, label = range_fn(d)
                 key = (period, label)
                 steps_by_period.setdefault(key, []).append(
@@ -137,7 +148,7 @@ def _compute_lifestyle_averages(
                 continue
             d = date.fromisoformat(date_str[:10])
             duration_min = _parse_duration_minutes(duration_str)
-            for period, range_fn in [("Month", _month_range), ("Year", _year_range)]:
+            for period, range_fn in PERIOD_RANGES:
                 _, _, label = range_fn(d)
                 key = (period, label)
                 sleep_by_period.setdefault(key, []).append(
@@ -162,7 +173,7 @@ def _compute_lifestyle_averages(
 
 
 def _build_summaries(workouts: list[dict]) -> list[dict]:
-    """Group workouts into month/year buckets, then aggregate All + per-modality."""
+    """Group workouts into week/month/year buckets, then aggregate All + per-modality."""
     records: list[dict] = []
     for w in workouts:
         props = w["properties"]
@@ -188,7 +199,7 @@ def _build_summaries(workouts: list[dict]) -> list[dict]:
 
     buckets: dict[tuple[str, str], dict] = {}
     for rec in records:
-        for period, range_fn in [("Month", _month_range), ("Year", _year_range)]:
+        for period, range_fn in PERIOD_RANGES:
             start, end, label = range_fn(rec["date"])
             key = (period, label)
             if key not in buckets:
@@ -329,7 +340,7 @@ def sync_summary(notion: NotionClient, settings: Settings) -> None:
     logger.info("Found %d workouts to aggregate", len(workouts))
 
     summaries = _build_summaries(workouts)
-    logger.info("Generated %d summary entries (month/year x modality)", len(summaries))
+    logger.info("Generated %d summary entries (week/month/year x modality)", len(summaries))
 
     lifestyle = _compute_lifestyle_averages(notion, settings)
     logger.info("Computed lifestyle averages for %d periods", len(lifestyle))
