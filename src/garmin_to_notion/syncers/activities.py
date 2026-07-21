@@ -17,7 +17,7 @@ from garmin_to_notion.formatters import (
     format_training_effect,
     gmt_to_local,
 )
-from garmin_to_notion.mappings import ACTIVITY_EMOJIS, classify_modality
+from garmin_to_notion.mappings import ACTIVITY_EMOJIS
 
 logger = logging.getLogger(__name__)
 
@@ -30,12 +30,6 @@ BATCH_SIZE = 100
 def _build_properties(activity: dict, settings: Settings) -> dict:
     """Build the Notion properties payload from a Garmin activity."""
     activity_name = activity.get("activityName", "Unnamed Activity")
-    activity_type, activity_subtype = format_activity_type(
-        activity.get("activityType", {}).get("typeKey", "Unknown"),
-        activity_name,
-    )
-    modality = classify_modality(activity_type, activity_subtype, activity_name)
-
     local_date = gmt_to_local(activity.get("startTimeGMT"), settings.timezone)
     duration_seconds = activity.get("duration", 0) or 0
     end_time = local_date + timedelta(seconds=duration_seconds)
@@ -45,7 +39,6 @@ def _build_properties(activity: dict, settings: Settings) -> dict:
         "Date": {"date": {"start": local_date.isoformat()}},
         "Start Time": {"date": {"start": local_date.isoformat()}},
         "End Time": {"date": {"start": end_time.isoformat()}},
-        "Modality": {"select": {"name": modality}},
         "Name": {"title": [{"text": {"content": activity_name}}]},
         "Distance (km)": {"number": round(activity.get("distance", 0) / 1000, 2)},
         "Duration": {
@@ -118,12 +111,11 @@ def _activity_exists(
     database_id: str,
     garmin_id: int | None,
     activity_date: datetime,
-    modality: str,
     activity_name: str,
 ) -> dict | None:
     """Check if an activity already exists in the Notion database.
 
-    Primary lookup: by Garmin ID (unique). Fallback: date + modality + name.
+    Primary lookup: by Garmin ID (unique). Fallback: date range + name.
     """
     if garmin_id:
         query = notion.databases.query(
@@ -143,7 +135,6 @@ def _activity_exists(
             "and": [
                 {"property": "Date", "date": {"on_or_after": lookup_min.isoformat()}},
                 {"property": "Date", "date": {"on_or_before": lookup_max.isoformat()}},
-                {"property": "Modality", "select": {"equals": modality}},
                 {"property": "Name", "title": {"equals": activity_name}},
             ]
         },
@@ -213,9 +204,6 @@ def _fetch_recent_activities(garmin: GarminClient, settings: Settings) -> list[d
             start, len(batch), len(activities),
         )
 
-        # Walk backward from the end of the batch to find a record with a
-        # usable timestamp -- one bad/missing startTimeGMT should not abort
-        # the entire fetch.
         reached_cutoff = False
         for record in reversed(batch):
             raw_ts = record.get("startTimeGMT")
@@ -261,17 +249,12 @@ def sync_activities(
     for activity in activities:
         try:
             activity_name = activity.get("activityName", "Unnamed Activity")
-            activity_type, activity_subtype = format_activity_type(
-                activity.get("activityType", {}).get("typeKey", "Unknown"),
-                activity_name,
-            )
-            modality = classify_modality(activity_type, activity_subtype, activity_name)
             activity_date = gmt_to_local(activity.get("startTimeGMT"), settings.timezone)
             garmin_id = activity.get("activityId")
 
             existing = _activity_exists(
                 notion, settings.activities_db_id,
-                garmin_id, activity_date, modality, activity_name,
+                garmin_id, activity_date, activity_name,
             )
 
             if existing:
