@@ -95,8 +95,10 @@ ACTIVITY_EMOJIS: dict[str, str] = {
 }
 
 # ---------------------------------------------------------------------------
-# Workouts: Garmin Activity Type / Subactivity Type -> Modality
-# Subactivity (more specific) is checked first, then Activity Type
+# Modality classification: Garmin Activity Type / Subactivity Type -> Modality
+# Subactivity (more specific) is checked first, then Activity Type.
+# This is the SINGLE place modality gets decided -- both Activities and
+# Workouts use classify_modality() below rather than duplicating this logic.
 # ---------------------------------------------------------------------------
 MODALITY_MAP: dict[str, str] = {
     # Subactivity Type mappings (checked first)
@@ -123,8 +125,6 @@ MODALITY_MAP: dict[str, str] = {
     "Yoga": "Yoga",
     "Lap Swimming": "Swimming",
     "Open Water Swimming": "Swimming",
-    # FIXED: Mixed Martial Arts now stays as its own Modality instead of
-    # being folded into BJJ.
     "Mixed Martial Arts": "Mixed Martial Arts",
     "Hiit": "HIIT",
     "Crossfit": "Crossfit",
@@ -153,9 +153,6 @@ MODALITY_MAP: dict[str, str] = {
     "Snowshoeing": "Winter Sports",
     "Ice Skating": "Winter Sports",
     # Water
-    # FIXED: SUP and Surfing now stay as their own Modality instead of
-    # being folded into the generic "Water Sports" bucket. Kayaking still
-    # rolls up into Water Sports as before.
     "Kayaking": "Water Sports",
     "Stand Up Paddleboarding": "SUP",
     "Surfing": "Surf",
@@ -164,16 +161,21 @@ MODALITY_MAP: dict[str, str] = {
     "Bouldering": "Climbing",
     "Indoor Climbing": "Climbing",
     "Mountaineering": "Climbing",
+    # Mind/recovery -- kept as their own modality (not folded into "Other")
+    # so the SKIP_TYPES check in workouts.py can still exclude them by name.
+    "Meditation": "Meditation",
+    "Breathwork": "Breathwork",
+    "Relaxation": "Relaxation",
+    "Stretching": "Stretching",
     # Other
     "Golf": "Golf",
     "Dance": "Dance",
     "Multi Sport": "Multi Sport",
     "Triathlon": "Multi Sport",
-    # Activity Type mappings (fallback)
+    # Activity Type mappings (fallback, when no subtype match)
     "Running": "Running",
     "Cycling": "Outdoor Cycling",
     "BJJ": "BJJ",
-    "Mixed Martial Arts": "Mixed Martial Arts",
     "SUP": "SUP",
     "Surf": "Surf",
     "HIIT": "HIIT",
@@ -188,6 +190,28 @@ MODALITY_MAP: dict[str, str] = {
     "Climbing": "Climbing",
     "Multi Sport": "Multi Sport",
 }
+
+
+def classify_modality(
+    activity_type: str,
+    activity_subtype: str,
+    activity_name: str = "",
+) -> str:
+    """Determine the Modality for an activity. Name override > Subtype > Type.
+
+    This is the single source of truth for modality classification --
+    used by activities.py at sync time (stored as the "Modality" property
+    on Activities) and simply copied across by workouts.py, rather than
+    being recomputed from raw Type/SubType text in two places.
+    """
+    if activity_name and activity_name in NAME_OVERRIDE_MAP:
+        return NAME_OVERRIDE_MAP[activity_name]
+    if activity_subtype and activity_subtype in MODALITY_MAP:
+        return MODALITY_MAP[activity_subtype]
+    if activity_type and activity_type in MODALITY_MAP:
+        return MODALITY_MAP[activity_type]
+    return "Other"
+
 
 # ---------------------------------------------------------------------------
 # Workouts: Aerobic Effect -> Intensity
@@ -205,7 +229,7 @@ INTENSITY_MAP: dict[str, str] = {
 }
 
 # ---------------------------------------------------------------------------
-# Workouts: Activity Name overrides (for custom Garmin activities)
+# Modality/Name overrides (checked before the Type/SubType map)
 # ---------------------------------------------------------------------------
 NAME_OVERRIDE_MAP: dict[str, str] = {
     "Sauna": "Sauna",
@@ -221,6 +245,6 @@ INTENSITY_FLOOR: dict[str, str] = {
 }
 
 # ---------------------------------------------------------------------------
-# Workouts: Skip these activity types (not real workouts)
+# Workouts: Skip these modalities (not real workouts)
 # ---------------------------------------------------------------------------
 SKIP_TYPES: set[str] = {"Breathwork", "Relaxation", "Meditation"}
