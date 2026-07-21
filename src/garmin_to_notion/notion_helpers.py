@@ -14,6 +14,7 @@ EXPECTED_DATABASES = {
     "Sleep": "sleep_db_id",
     "Workouts": "workouts_db_id",
     "Activity Summary": "summary_db_id",
+    "Daily Calories": "calories_db_id",
 }
 
 
