@@ -106,6 +106,12 @@ def _build_properties(activity_page: dict) -> tuple[dict, str, str | None, int |
         workout_props["Start Time"] = {"date": {"start": start_time}}
     if end_time:
         workout_props["End Time"] = {"date": {"start": end_time}}
+    if start_time and end_time:
+        # "Time" is a date-RANGE property (End date toggled on in Notion),
+        # used by the Calendar view so entries render as a proper duration
+        # bar instead of a single point. Start Time / End Time above are kept
+        # as separate plain properties too, unchanged.
+        workout_props["Time"] = {"date": {"start": start_time, "end": end_time}}
     if duration and duration.strip():
         workout_props["Duration"] = {"rich_text": [{"text": {"content": duration}}]}
     if distance and distance > 0:
