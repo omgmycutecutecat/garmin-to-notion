@@ -1,9 +1,9 @@
 """Transform the Activities database into the Workouts database.
 
 Reads from the Activities database and creates/updates entries in the
-Workouts database with intensity mapping. Modality is no longer computed
-here -- it's read directly from the "Modality" property Activities already
-wrote (classified once, in activities.py, via mappings.classify_modality).
+Workouts database with intensity mapping. The Workout title is the RAW
+Garmin activity name (copied straight from Activities) -- no renaming,
+no modality classification.
 
 Runs AFTER the activities sync.
 """
@@ -15,7 +15,7 @@ import logging
 from notion_client import Client as NotionClient
 
 from garmin_to_notion.config import Settings
-from garmin_to_notion.mappings import INTENSITY_FLOOR, INTENSITY_MAP, SKIP_TYPES
+from garmin_to_notion.mappings import INTENSITY_MAP, SKIP_NAME_KEYWORDS
 from garmin_to_notion.notion_helpers import fetch_all_pages, get_prop
 
 logger = logging.getLogger(__name__)
@@ -34,15 +34,11 @@ def _get_intensity(aerobic_effect_rich: str) -> str:
     return INTENSITY_MAP.get(label, "Moderate")
 
 
-def _apply_intensity_floor(modality: str, intensity: str) -> str:
-    """Override intensity if below the minimum for certain modalities."""
-    floor = INTENSITY_FLOOR.get(modality)
-    if not floor:
-        return intensity
-    rank = {"Easy": 0, "Moderate": 1, "Hard": 2, "Maximum": 3}
-    if rank.get(intensity, 1) < rank.get(floor, 1):
-        return floor
-    return intensity
+def _should_skip(activity_name: str) -> bool:
+    """Skip meditation/breathwork/relaxation-style entries based on the raw
+    activity name, since there's no modality field to check anymore."""
+    name_lower = activity_name.lower()
+    return any(keyword in name_lower for keyword in SKIP_NAME_KEYWORDS)
 
 
 def _workout_exists(
@@ -50,9 +46,9 @@ def _workout_exists(
     db_id: str,
     garmin_id: int | None,
     date_str: str | None,
-    modality: str,
+    activity_name: str,
 ) -> dict | None:
-    """Check if a workout already exists by Garmin ID or date+modality."""
+    """Check if a workout already exists by Garmin ID, or date+name."""
     if garmin_id:
         query = notion.databases.query(
             database_id=db_id,
@@ -68,7 +64,7 @@ def _workout_exists(
             filter={
                 "and": [
                     {"property": "Date", "date": {"equals": date_only}},
-                    {"property": "Modality", "select": {"equals": modality}},
+                    {"property": "Workout", "title": {"equals": activity_name}},
                 ]
             },
         )
@@ -81,11 +77,11 @@ def _workout_exists(
 def _build_properties(activity_page: dict) -> tuple[dict, str, str | None, int | None]:
     """Build Workouts properties from an Activities page.
 
-    Returns (properties_dict, modality, date_start, garmin_id).
+    Returns (properties_dict, activity_name, date_start, garmin_id).
     """
     props = activity_page["properties"]
 
-    modality = get_prop(props, "Modality", "select") or "Other"
+    activity_name = get_prop(props, "Name", "title") or "Unnamed Activity"
     date_start = get_prop(props, "Date", "date")
     duration = get_prop(props, "Duration", "rich_text") or ""
     calories = get_prop(props, "Calories", "number")
@@ -98,13 +94,9 @@ def _build_properties(activity_page: dict) -> tuple[dict, str, str | None, int |
     end_time = get_prop(props, "End Time", "date")
 
     intensity = _get_intensity(aerobic_effect)
-    intensity = _apply_intensity_floor(modality, intensity)
 
-    # Workout title is always the modality -- keeps Board/Calendar views
-    # clean. Raw activity names live in the Activities database.
     workout_props: dict = {
-        "Workout": {"title": [{"text": {"content": modality}}]},
-        "Modality": {"select": {"name": modality}},
+        "Workout": {"title": [{"text": {"content": activity_name}}]},
         "Intensity": {"select": {"name": intensity}},
     }
 
@@ -125,7 +117,7 @@ def _build_properties(activity_page: dict) -> tuple[dict, str, str | None, int |
     if avg_hr and avg_hr > 0:
         workout_props["Avg HR"] = {"number": round(avg_hr)}
 
-    return workout_props, modality, date_start, garmin_id
+    return workout_props, activity_name, date_start, garmin_id
 
 
 def sync_workouts(notion: NotionClient, settings: Settings) -> None:
@@ -142,15 +134,15 @@ def sync_workouts(notion: NotionClient, settings: Settings) -> None:
 
     for activity in activities:
         props = activity["properties"]
-        modality = get_prop(props, "Modality", "select") or "Other"
+        activity_name = get_prop(props, "Name", "title") or "Unnamed Activity"
 
-        if modality in SKIP_TYPES:
+        if _should_skip(activity_name):
             skipped += 1
             continue
 
-        workout_props, modality, date_start, garmin_id = _build_properties(activity)
+        workout_props, activity_name, date_start, garmin_id = _build_properties(activity)
         existing = _workout_exists(
-            notion, settings.workouts_db_id, garmin_id, date_start, modality
+            notion, settings.workouts_db_id, garmin_id, date_start, activity_name
         )
 
         if existing:
@@ -158,7 +150,7 @@ def sync_workouts(notion: NotionClient, settings: Settings) -> None:
             updated += 1
         else:
             if garmin_id:
-                workout_props["Source"] = {"url": f"{GARMIN_ACTIVITY_URL}{garmin_id}"}
+                workout_props["Garmin Link"] = {"url": f"{GARMIN_ACTIVITY_URL}{garmin_id}"}
                 workout_props["Garmin ID"] = {"number": garmin_id}
             notion.pages.create(
                 parent={"database_id": settings.workouts_db_id},
