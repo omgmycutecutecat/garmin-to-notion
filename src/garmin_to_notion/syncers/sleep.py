@@ -1,170 +1,253 @@
-"""Transform the Activities database into the Workouts database.
-
-Reads from the Activities database and creates/updates entries in the
-Workouts database with intensity mapping. The Workout title is the RAW
-Garmin activity name (copied straight from Activities) -- no renaming,
-no modality classification.
-
-Runs AFTER the activities sync.
-"""
+"""Sync Garmin sleep data to the Notion Sleep database."""
 
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
+from garminconnect import Garmin as GarminClient
 from notion_client import Client as NotionClient
 
 from garmin_to_notion.config import Settings
-from garmin_to_notion.mappings import INTENSITY_MAP, SKIP_NAME_KEYWORDS
+from garmin_to_notion.formatters import format_duration
 from garmin_to_notion.notion_helpers import fetch_all_pages, get_prop
 
 logger = logging.getLogger(__name__)
 
-GARMIN_ACTIVITY_URL = "https://connect.garmin.com/modern/activity/"
+
+def _epoch_ms_to_local_iso(timestamp_ms: int | None, tz: ZoneInfo) -> str | None:
+    """Convert a Garmin millisecond epoch timestamp to a local ISO datetime string."""
+    if not timestamp_ms:
+        return None
+    dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc).astimezone(tz)
+    return dt.isoformat()
 
 
-def _get_intensity(aerobic_effect_rich: str) -> str:
-    """Map aerobic effect rich text to intensity level.
+def _compute_sleep_score(
+    deep_sec: int, light_sec: int, rem_sec: int, awake_sec: int
+) -> int:
+    """Compute a 0-100 sleep quality score from sleep stage data.
 
-    Parses labels like "3.2 - Highly Impacting" to extract "Highly Impacting".
+    Scoring (inspired by WHOOP/Oura methodology):
+    - Duration score (40%): optimal 7-9h total sleep
+    - Deep % score (25%): optimal ~20% of total sleep
+    - REM % score (25%): optimal ~22% of total sleep
+    - Awake penalty (10%): less awake time = better
+
+    Returns minimum 1 for valid data (avoids zero in charts).
     """
-    label = aerobic_effect_rich
-    if " - " in aerobic_effect_rich:
-        label = aerobic_effect_rich.split(" - ", 1)[1]
-    return INTENSITY_MAP.get(label, "Moderate")
+    total_sleep = deep_sec + light_sec + rem_sec
+    if total_sleep == 0:
+        return 0
+
+    total_hours = total_sleep / 3600
+
+    if 7 <= total_hours <= 9:
+        dur_score = 100
+    elif total_hours < 7:
+        dur_score = max(0, (total_hours - 4) / 3 * 100)
+    else:
+        dur_score = max(0, (11 - total_hours) / 2 * 100)
+
+    deep_pct = deep_sec / total_sleep * 100
+    deep_score = max(0, 100 - abs(deep_pct - 20) * 4)
+
+    rem_pct = rem_sec / total_sleep * 100
+    rem_score = max(0, 100 - abs(rem_pct - 22) * 4)
+
+    awake_min = awake_sec / 60
+    awake_score = max(0, 100 - awake_min * (100 / 30))
+
+    score = dur_score * 0.40 + deep_score * 0.25 + rem_score * 0.25 + awake_score * 0.10
+    return round(min(100, max(1, score)))
 
 
-def _should_skip(activity_name: str) -> bool:
-    """Skip meditation/breathwork/relaxation-style entries based on the raw
-    activity name, since there's no modality field to check anymore."""
-    name_lower = activity_name.lower()
-    return any(keyword in name_lower for keyword in SKIP_NAME_KEYWORDS)
+def _get_existing_sleep_dates(
+    notion: NotionClient, database_id: str
+) -> dict[str, dict]:
+    """Fetch all existing sleep entries and return {date_str: page} mapping."""
+    pages = fetch_all_pages(notion, database_id)
+    result: dict[str, dict] = {}
+    for page in pages:
+        date_str = get_prop(page["properties"], "Date", "date")
+        if date_str:
+            result[date_str[:10]] = page
+    return result
 
 
-def _workout_exists(
-    notion: NotionClient,
-    db_id: str,
-    garmin_id: int | None,
-    date_str: str | None,
-    activity_name: str,
-) -> dict | None:
-    """Check if a workout already exists by Garmin ID, or date+name."""
-    if garmin_id:
-        query = notion.databases.query(
-            database_id=db_id,
-            filter={"property": "Garmin ID", "number": {"equals": garmin_id}},
-        )
-        if query["results"]:
-            return query["results"][0]
+def _get_sleep_range(
+    garmin: GarminClient,
+    days_back: int,
+    tz: ZoneInfo,
+    existing_dates: set[str],
+) -> list[dict]:
+    """Fetch sleep data for the last *days_back* days, skipping known dates."""
+    today = datetime.now(tz=tz).date()
+    results = []
+    skipped = 0
+    for i in range(days_back):
+        d = today - timedelta(days=i)
+        date_str = d.isoformat()
+        if date_str in existing_dates:
+            skipped += 1
+            continue
+        try:
+            data = garmin.get_sleep_data(date_str)
+            if data and data.get("dailySleepDTO"):
+                results.append(data)
+        except Exception:
+            logger.debug("No sleep data for %s", date_str)
+        if (i + 1) % 100 == 0:
+            logger.info(
+                "Sleep fetch progress: %d/%d days checked (%d skipped)",
+                i + 1, days_back, skipped,
+            )
+    if skipped:
+        logger.info("Skipped %d days already in Notion", skipped)
+    return results
 
-    if date_str:
-        date_only = date_str[:10]
-        query2 = notion.databases.query(
-            database_id=db_id,
-            filter={
-                "and": [
-                    {"property": "Date", "date": {"equals": date_only}},
-                    {"property": "Workout", "title": {"equals": activity_name}},
-                ]
-            },
-        )
-        if query2["results"]:
-            return query2["results"][0]
 
-    return None
+def _build_properties(sleep_data: dict, settings: Settings) -> dict | None:
+    """Build Notion properties from Garmin sleep data. Returns None if no data."""
+    daily_sleep = sleep_data.get("dailySleepDTO", {})
+    if not daily_sleep:
+        return None
 
+    sleep_date = daily_sleep.get("calendarDate", "Unknown Date")
+    total_sleep = sum(
+        (daily_sleep.get(k, 0) or 0)
+        for k in ("deepSleepSeconds", "lightSleepSeconds", "remSleepSeconds")
+    )
 
-def _build_properties(activity_page: dict) -> tuple[dict, str, str | None, int | None]:
-    """Build Workouts properties from an Activities page.
+    if total_sleep == 0:
+        logger.info("Skipping sleep data for %s (total sleep is 0)", sleep_date)
+        return None
 
-    Returns (properties_dict, activity_name, date_start, garmin_id).
-    """
-    props = activity_page["properties"]
+    score = _compute_sleep_score(
+        daily_sleep.get("deepSleepSeconds", 0) or 0,
+        daily_sleep.get("lightSleepSeconds", 0) or 0,
+        daily_sleep.get("remSleepSeconds", 0) or 0,
+        daily_sleep.get("awakeSleepSeconds", 0) or 0,
+    )
 
-    activity_name = get_prop(props, "Name", "title") or "Unnamed Activity"
-    date_start = get_prop(props, "Date", "date")
-    duration = get_prop(props, "Duration", "rich_text") or ""
-    calories = get_prop(props, "Calories", "number")
-    distance = get_prop(props, "Distance (km)", "number")
-    avg_pace = get_prop(props, "Avg Pace", "rich_text") or ""
-    avg_hr = get_prop(props, "Avg HR", "number")
-    aerobic_effect = get_prop(props, "Aerobic Effect", "rich_text") or "Unknown"
-    garmin_id = get_prop(props, "Garmin ID", "number")
-    start_time = get_prop(props, "Start Time", "date")
-    end_time = get_prop(props, "End Time", "date")
+    # Garmin exposes sleep window bounds as millisecond epoch timestamps.
+    start_iso = _epoch_ms_to_local_iso(
+        daily_sleep.get("sleepStartTimestampGMT"), settings.timezone
+    )
+    end_iso = _epoch_ms_to_local_iso(
+        daily_sleep.get("sleepEndTimestampGMT"), settings.timezone
+    )
 
-    intensity = _get_intensity(aerobic_effect)
-
-    workout_props: dict = {
-        "Workout": {"title": [{"text": {"content": activity_name}}]},
-        "Intensity": {"select": {"name": intensity}},
+    properties = {
+        "Name": {
+            "title": [{"text": {"content": format_duration(total_sleep)}}]
+        },
+        "Date": {"date": {"start": sleep_date}},
+        "Duration": {
+            "rich_text": [{"text": {"content": format_duration(total_sleep)}}]
+        },
+        "Deep": {
+            "rich_text": [
+                {"text": {"content": format_duration(daily_sleep.get("deepSleepSeconds", 0))}}
+            ]
+        },
+        "Light": {
+            "rich_text": [
+                {"text": {"content": format_duration(daily_sleep.get("lightSleepSeconds", 0))}}
+            ]
+        },
+        "REM": {
+            "rich_text": [
+                {"text": {"content": format_duration(daily_sleep.get("remSleepSeconds", 0))}}
+            ]
+        },
+        "Awake": {
+            "rich_text": [
+                {"text": {"content": format_duration(daily_sleep.get("awakeSleepSeconds", 0))}}
+            ]
+        },
+        "Resting HR": {"number": sleep_data.get("restingHeartRate", 0)},
+        "Score": {"number": score},
     }
 
-    if date_start:
-        workout_props["Date"] = {"date": {"start": date_start}}
-    if start_time:
-        workout_props["Start Time"] = {"date": {"start": start_time}}
-    if end_time:
-        workout_props["End Time"] = {"date": {"start": end_time}}
-    if start_time and end_time:
+    if start_iso:
+        properties["Start Time"] = {"date": {"start": start_iso}}
+    if end_iso:
+        properties["End Time"] = {"date": {"start": end_iso}}
+    if start_iso and end_iso:
         # "Time" is a date-RANGE property (End date toggled on in Notion),
         # used by the Calendar view so entries render as a proper duration
         # bar instead of a single point. Start Time / End Time above are kept
         # as separate plain properties too, unchanged.
-        workout_props["Time"] = {"date": {"start": start_time, "end": end_time}}
-    if duration and duration.strip():
-        workout_props["Duration"] = {"rich_text": [{"text": {"content": duration}}]}
-    if distance and distance > 0:
-        workout_props["Distance (km)"] = {"number": round(distance, 2)}
-    if calories and calories > 0:
-        workout_props["Calories"] = {"number": round(calories)}
-    if avg_pace and avg_pace.strip():
-        workout_props["Avg Pace"] = {"rich_text": [{"text": {"content": avg_pace}}]}
-    if avg_hr and avg_hr > 0:
-        workout_props["Avg HR"] = {"number": round(avg_hr)}
+        properties["Time"] = {"date": {"start": start_iso, "end": end_iso}}
 
-    return workout_props, activity_name, date_start, garmin_id
+    return properties
 
 
-def sync_workouts(notion: NotionClient, settings: Settings) -> None:
-    """Sync Activities database entries to the Workouts database."""
-    if not settings.workouts_db_id:
-        logger.info("No workouts database configured, skipping")
+def sync_sleep(
+    garmin: GarminClient,
+    notion: NotionClient,
+    settings: Settings,
+) -> None:
+    """Sync historical sleep data to the Notion Sleep database."""
+    if not settings.sleep_db_id:
+        logger.info("No sleep database configured, skipping")
         return
 
-    logger.info("Fetching activities from Activities database...")
-    activities = fetch_all_pages(notion, settings.activities_db_id)
-    logger.info("Found %d activities", len(activities))
+    logger.info("Fetching existing sleep entries from Notion...")
+    existing_map = _get_existing_sleep_dates(notion, settings.sleep_db_id)
+    logger.info("Found %d existing sleep entries in Notion", len(existing_map))
 
-    created, updated, skipped = 0, 0, 0
+    sleep_entries = _get_sleep_range(
+        garmin, settings.days_back, settings.timezone, set(existing_map.keys())
+    )
+    logger.info("Fetched %d new sleep entries from Garmin", len(sleep_entries))
 
-    for activity in activities:
-        props = activity["properties"]
-        activity_name = get_prop(props, "Name", "title") or "Unnamed Activity"
+    created = 0
 
-        if _should_skip(activity_name):
-            skipped += 1
+    for data in sleep_entries:
+        sleep_date = data.get("dailySleepDTO", {}).get("calendarDate")
+        if not sleep_date:
             continue
 
-        workout_props, activity_name, date_start, garmin_id = _build_properties(activity)
-        existing = _workout_exists(
-            notion, settings.workouts_db_id, garmin_id, date_start, activity_name
-        )
+        properties = _build_properties(data, settings)
+        if not properties:
+            continue
 
-        if existing:
-            notion.pages.update(page_id=existing["id"], properties=workout_props)
-            updated += 1
-        else:
-            if garmin_id:
-                workout_props["Garmin Link"] = {"url": f"{GARMIN_ACTIVITY_URL}{garmin_id}"}
-                workout_props["Garmin ID"] = {"number": garmin_id}
-            notion.pages.create(
-                parent={"database_id": settings.workouts_db_id},
-                properties=workout_props,
+        notion.pages.create(
+            parent={"database_id": settings.sleep_db_id},
+            properties=properties,
+        )
+        created += 1
+
+    repaired = 0
+    for date_str, page in existing_map.items():
+        props = page["properties"]
+        current_score = get_prop(props, "Score", "number")
+        if current_score and current_score > 0:
+            continue
+
+        try:
+            data = garmin.get_sleep_data(date_str)
+            if not data or not data.get("dailySleepDTO"):
+                continue
+        except Exception:
+            continue
+
+        new_props = _build_properties(data, settings)
+        if not new_props:
+            continue
+
+        new_score = new_props["Score"]["number"]
+        if new_score and new_score > 0:
+            notion.pages.update(
+                page_id=page["id"],
+                properties={"Score": {"number": new_score}},
             )
-            created += 1
+            repaired += 1
 
     logger.info(
-        "Workouts sync complete: %d created, %d updated, %d skipped",
-        created, updated, skipped,
+        "Sleep sync complete: %d created, %d already existed, %d scores repaired",
+        created, len(existing_map), repaired,
     )
